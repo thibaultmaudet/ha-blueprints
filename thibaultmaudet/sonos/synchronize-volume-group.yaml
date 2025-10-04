@@ -1,0 +1,46 @@
+blueprint:
+  name: Synchronize volume inside a Sonos group
+  description: >
+    Keeps the volume synchronized across all Sonos speakers in the same group.
+    When the volume changes on one selected speaker, the change is applied to
+    all other members of its group, only if:
+      - the source is not TV
+      - the triggering speaker is in playing or paused state
+      - the group has at least 2 speakers
+  domain: automation
+  input:
+    sonos_players:
+      name: Sonos speakers to monitor
+      description: Select the Sonos speakers whose volume changes should trigger synchronization.
+      selector:
+        entity:
+          domain: media_player
+          integration: sonos
+          multiple: true
+
+triggers:
+  - platform: state
+    entity_id: !input sonos_players
+    attribute: volume_level
+
+conditions:
+  - condition: template
+    value_template: >
+      {{ state_attr(trigger.entity_id, 'source') != 'TV' }}
+  - condition: template
+    value_template: >
+      {{ states(trigger.entity_id) in ['playing', 'paused'] }}
+  - condition: template
+    value_template: >
+      {{ state_attr(trigger.entity_id, 'group_members') | length > 1 }}
+
+actions:
+  - variables:
+      group: "{{ state_attr(trigger.entity_id, 'group_members') }}"
+  - action: media_player.volume_set
+    target:
+      entity_id: "{{ group }}"
+    data:
+      volume_level: "{{ state_attr(trigger.entity_id, 'volume_level') }}"
+
+mode: single
