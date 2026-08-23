@@ -1,0 +1,113 @@
+blueprint:
+  name: "Sonos - Smart Volume"
+  description: >
+    Combines 1:1 synchronization and Harmonic volume.
+    - If the Master is in the group: It controls the volume of active satellites via the ratio.
+    - If the Master IS NOT in the group: Active satellites synchronize with each other at 100% (1:1).
+    - Inactive speakers or those in another group are ignored.
+  domain: automation
+  input:
+    master_player:
+      name: "Master Speaker (Reference)"
+      description: "The speaker that dictates the volume (using the ratio) when it is present in the group."
+      selector:
+        entity:
+          domain: media_player
+          integration: sonos
+          multiple: false
+    satellite_players:
+      name: "Satellite Speakers"
+      description: "The speakers that follow the Master, or synchronize with each other if the Master is absent."
+      selector:
+        entity:
+          domain: media_player
+          integration: sonos
+          multiple: true
+    volume_ratio:
+      name: "Volume Ratio (Master -> Satellite)"
+      description: "Ex: 1.5 means the Satellites will be 50% louder than the Master."
+      default: 1.5
+      selector:
+        number:
+          min: 0.1
+          max: 3.0
+          step: 0.1
+          mode: slider
+
+triggers:
+  - platform: state
+    entity_id: !input master_player
+    attribute: volume_level
+  - platform: state
+    entity_id: !input satellite_players
+    attribute: volume_level
+
+conditions:
+  - condition: template
+    value_template: '{{ state_attr(trigger.entity_id, "source") != "TV" }}'
+  - condition: template
+    value_template: '{{ states(trigger.entity_id) in ["playing", "paused"] }}'
+  - condition: template
+    value_template: '{{ state_attr(trigger.entity_id, "group_members") | length > 1 }}'
+
+actions:
+  - variables:
+      master: !input master_player
+      satellites: !input satellite_players
+      ratio: !input volume_ratio
+      trigger_entity: '{{ trigger.entity_id }}'
+      trigger_vol: '{{ trigger.to_state.attributes.volume_level | float(0) }}'
+      active_group: '{{ state_attr(trigger_entity, "group_members") | default([], true) }}'
+      master_in_group: '{{ master in active_group }}'
+
+  - choose:
+      # SCENARIO 1: The Master is in the group and IT was the one modified
+      - conditions:
+          - condition: template
+            value_template: '{{ master_in_group and trigger_entity == master }}'
+        sequence:
+          - variables:
+              target_vol: '{{ [ (trigger_vol * ratio), 1.0 ] | min }}'
+          - repeat:
+              for_each: !input satellite_players
+              sequence:
+                - variables:
+                    current_satellite: '{{ repeat.item }}'
+                # Check that the satellite is in the group AND its volume really needs to be changed (anti-loop)
+                - if:
+                    - condition: template
+                      value_template: >
+                        {% set current_vol = state_attr(current_satellite, 'volume_level') | float(-1) %}
+                        {{ current_satellite in active_group and (current_vol - target_vol) | abs > 0.01 }}
+                  then:
+                    - action: media_player.volume_set
+                      target:
+                        entity_id: '{{ current_satellite }}'
+                      data:
+                        volume_level: '{{ target_vol }}'
+
+      # SCENARIO 2: The Master is NOT in the group and a satellite was modified
+      - conditions:
+          - condition: template
+            value_template: '{{ not master_in_group and trigger_entity in satellites }}'
+        sequence:
+          - repeat:
+              for_each: !input satellite_players
+              sequence:
+                - variables:
+                    current_satellite: '{{ repeat.item }}'
+                # Update the other satellites in the current group
+                - if:
+                    - condition: template
+                      value_template: >
+                        {% set current_vol = state_attr(current_satellite, 'volume_level') | float(-1) %}
+                        {{ current_satellite in active_group and current_satellite != trigger_entity and (current_vol - trigger_vol) | abs > 0.01 }}
+                  then:
+                    - action: media_player.volume_set
+                      target:
+                        entity_id: '{{ current_satellite }}'
+                      data:
+                        volume_level: '{{ trigger_vol }}'
+
+mode: restart
+max_exceeded: silent
